@@ -1948,6 +1948,7 @@ function saRequestWalletRenewalCharge(adminId, amount, note, plan){
         decidedAt: null, decisionReason: null, plan: plan || null
     };
     wallet.chargeRequests = wallet.chargeRequests || [];
+    wallet.chargeRequests.forEach(function(r){ if (r.status === 'Pending') { r.status = 'Rejected'; r.decidedAt = new Date().toISOString(); r.decisionReason = 'Auto-rejected: replaced by a newer request'; } });
     wallet.chargeRequests.push(req);
     data.wallet = wallet;
     saWriteLibrary(adminId, data);
@@ -3689,6 +3690,12 @@ function saRenderFreezePanel(wallet){
         body.innerHTML = '<p style="font-size:0.74rem;color:var(--grey);margin:0;">Freezing isn\'t available while the wallet is closing or permanently closed.</p>';
         return;
     }
+    const _ekycDone = !!(wallet.setup && wallet.setup.done);
+    if (!_ekycDone && wallet.status !== 'frozen') {
+        body.innerHTML = '<p style=\"font-size:0.74rem;color:var(--grey);margin:0 0 10px;\">Freeze is disabled until the Admin completes the first-time Wallet Video eKYC. It will be enabled automatically once eKYC is done.</p>' +
+            '<button disabled style=\"width:100%;background:#94a3b8;color:#fff;border:none;padding:11px;border-radius:10px;font-weight:800;font-size:0.8rem;cursor:not-allowed;opacity:.6;\">Freeze Wallet (disabled)</button>';
+        return;
+    }
     if (wallet.status === 'frozen') {
         body.innerHTML =
             '<p style="font-size:0.76rem;color:#1e3a8a;margin:0 0 8px;">Frozen on ' + saFmtWalletDate(wallet.frozenAt) + '.</p>' +
@@ -3702,6 +3709,7 @@ function saRenderFreezePanel(wallet){
 }
 function saOpenFreezeModal(){
     if (!_saWalletAdminId) return;
+    { const _w = saGetWallet(_saWalletAdminId); if (!(_w.setup && _w.setup.done)) { alert('Freeze is available only after the Admin completes the first-time Wallet Video eKYC.'); return; } }
     document.getElementById('sa-freeze-reason').value = '';
     hideErrEl('err-sa-freeze-reason');
     document.getElementById('sa-freeze-modal').style.display = 'flex';
@@ -4081,6 +4089,8 @@ function saRenderPlans(){
     document.getElementById('sa-plans-list').innerHTML = a.length ? a.map(p =>
         `<div style="display:flex;align-items:center;gap:8px;border:1px solid var(--border);border-radius:10px;padding:9px 11px;margin-bottom:6px;">
             <div style="flex:1;min-width:0;"><div style="font-size:0.8rem;font-weight:800;">${p.name}</div><div style="font-size:0.68rem;color:var(--grey);">₹${p.price} • ${p.months} month${p.months > 1 ? 's' : ''}</div></div>
+            <span style="font-size:0.62rem;font-weight:800;padding:3px 7px;border-radius:20px;background:${p.active === false ? '#f1f5f9' : '#dcfce7'};color:${p.active === false ? '#64748b' : '#166534'};">${p.active === false ? 'Disabled' : 'Active'}</span>
+            <button style="border:none;background:${p.active === false ? '#f0fdf4' : '#fffbeb'};color:${p.active === false ? '#16a34a' : '#b45309'};padding:6px 10px;border-radius:8px;font-size:0.7rem;font-weight:800;cursor:pointer;" onclick="saTogglePlanActive('${p.id}')">${p.active === false ? 'Enable' : 'Disable'}</button>
             <button style="border:none;background:#eff6ff;color:#1e40af;padding:6px 10px;border-radius:8px;font-size:0.7rem;font-weight:800;cursor:pointer;" onclick="saEditPlan('${p.id}')">Edit</button>
             <button style="border:none;background:#fef2f2;color:#dc2626;padding:6px 10px;border-radius:8px;font-size:0.7rem;font-weight:800;cursor:pointer;" onclick="saDeletePlan('${p.id}')">Delete</button>
         </div>`).join('') : '<div style="text-align:center;color:var(--grey);font-size:0.78rem;padding:12px;">Koi plan nahi hai — neeche naya banayein.</div>';
@@ -4104,8 +4114,14 @@ function saSavePlan(){
     else a.push({ id: 'PLN' + Date.now(), name, price, months });
     saPutPlans(a); saEditPlan(null); saRenderPlans();
 }
+function saTogglePlanActive(id){
+    const a = saGetPlans(); const p = a.find(x => x.id === id); if (!p) return;
+    p.active = (p.active === false);
+    saPutPlans(a); saRenderPlans();
+    if (typeof saChargePlanUi === 'function' && document.getElementById('sa-charge-plan-wrap') && document.getElementById('sa-charge-plan-wrap').style.display === 'block') saChargePlanUi('renewal');
+}
 function saDeletePlan(id){
-    if (!confirm('Yeh plan delete karein? Pehle se active subscriptions par asar nahi padega.')) return;
+    if (!confirm('Delete this plan? Subscriptions that are already active will not be affected.')) return;
     saPutPlans(saGetPlans().filter(p => p.id !== id)); saEditPlan(null); saRenderPlans();
 }
 // Renewal modal: plan dropdown auto-fills the amount (still editable for a custom/discounted charge).
@@ -4113,9 +4129,9 @@ function saChargePlanUi(type){
     const wrap = document.getElementById('sa-charge-plan-wrap');
     wrap.style.display = type === 'renewal' ? 'block' : 'none';
     if (type !== 'renewal') return;
-    const a = saGetPlans();
+    const a = saGetPlans().filter(p => p.active !== false);
     document.getElementById('sa-charge-plan').innerHTML = '<option value="">— Plan select karein —</option>' +
-        a.map(p => `<option value="${p.id}">${p.name} — ₹${p.price} / ${p.months} mo</option>`).join('');
+        a.map(p => `<option value="${p.id}">${p.name} — ₹${p.price} / ${p.months} month${p.months > 1 ? 's' : ''}</option>`).join('');
     document.getElementById('sa-charge-plan-info').innerHTML = ''; _saAutoNote = '';
 }
 let _saAutoNote = '';
@@ -4168,7 +4184,7 @@ function subCardHtml(sub, isAdmin, wallet){
         '<div style="font-size:0.74rem;font-weight:700;">Started: ' + subFmt(sub.startedAt) + ' &nbsp;•&nbsp; Next Renewal: ' + subFmt(sub.expiresAt) + '</div>' +
         '<div style="font-size:0.72rem;color:' + st.color + ';font-weight:800;margin-top:3px;">' + (st.days >= 0 ? st.days + ' day(s) left' : Math.abs(st.days) + ' day(s) pehle expire ho gaya') + '</div>' +
         '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px;background:linear-gradient(135deg,#fff,#f0f9ff);border:1px solid ' + (on ? '#86efac' : '#bae6fd') + ';border-radius:14px;padding:11px 13px;">' +
-            '<div style="min-width:0;"><div style="font-size:0.78rem;font-weight:800;">🔁 Auto-Renewal</div><div style="font-size:0.64rem;color:#64748b;line-height:1.4;margin-top:2px;">' + (on ? '₹' + sub.price + ' is auto-deducted at expiry (balance may go negative)' : 'Off — a renewal request is sent automatically on the renewal date') + '</div></div>' + sw + '</div>' +
+            '<div style="min-width:0;"><div style="font-size:0.78rem;font-weight:800;">🔁 Auto-Renewal</div><div style="font-size:0.64rem;color:#64748b;line-height:1.4;margin-top:2px;">' + (on ? 'ON — on the renewal date, ' + sub.price + ' is deducted from the Admin\'s wallet automatically and the plan is extended. No request or approval is needed. (Balance may go negative.)' : 'OFF — on the renewal date the system sends a renewal request to the Admin. The plan is extended only after the Admin accepts it and the amount is deducted.') + '</div></div>' + sw + '</div>' +
         subRestrictLine(sub) +
         (wallet && wallet.balance < 0 && sub.autoNegative ? '<div style="margin-top:8px;background:#fef2f2;border:1px solid #fecaca;border-radius:12px;padding:10px 12px;font-size:0.68rem;line-height:1.5;color:#991b1b;"><b>⚠️ Why is the wallet balance negative?</b><br>The ' + (sub.autoNegative.kind === 'authority' ? 'renewal accepted by the Super Admin (authority granted by the Admin)' : 'Auto-Renewal') + ' of ₹' + sub.autoNegative.amount + ' (' + subEsc(sub.autoNegative.planName) + ' plan) on ' + subFmt(sub.autoNegative.date) + ' was deducted when the wallet had only ₹' + sub.autoNegative.balanceBefore + ', so the balance went to −₹' + Math.abs(sub.autoNegative.balanceAfter) + '. Please add funds to bring it back above zero.</div>' : '') +
         (hist.length ? '<div style="margin-top:10px;background:#fff;border:1px solid #bae6fd;border-radius:14px;padding:11px 13px;">' +
@@ -4185,7 +4201,7 @@ function subInvoiceHtml(wallet, libId, h, idx){
     const row = (k, v) => '<tr><td style="color:#64748b;width:45%">' + k + '</td><td><b>' + v + '</b></td></tr>';
     return '<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + subEsc(no) + '</title><style>body{font-family:Arial,sans-serif;color:#0f172a;max-width:720px;margin:30px auto;padding:0 20px}h1{margin:0;font-size:1.5rem;color:#0369a1}.top{display:flex;justify-content:space-between;border-bottom:3px solid #0369a1;padding-bottom:14px}.m{font-size:.85rem;line-height:1.7}table{width:100%;border-collapse:collapse;margin-top:18px}th,td{padding:10px;text-align:left;border-bottom:1px solid #e2e8f0;font-size:.88rem}th{background:#f1f5f9}.box td{padding:7px 10px;font-size:.85rem}.t{text-align:right;font-size:1.1rem;font-weight:800;margin-top:16px}.paid{display:inline-block;border:2px solid #16a34a;color:#16a34a;font-weight:800;padding:3px 12px;border-radius:6px;margin-top:8px}.f{margin-top:36px;font-size:.72rem;color:#64748b;text-align:center}@media print{body{margin:0}}</style></head><body>' +
         '<div class="top"><div><h1>Samarthak</h1><div class="m">Subscription Invoice</div></div><div class="m" style="text-align:right"><b style="font-size:1.05rem">' + subEsc(no) + '</b><br>Date: ' + subFmt(h.date) + '<br><span class="paid">PAID</span></div></div>' +
-        '<div class="m" style="margin-top:16px"><b>Billed To</b><br>Library ID: ' + subEsc(libId) + (wallet.id ? '<br>Wallet UID: ' + subEsc(wallet.id) : '') + '</div>' +
+        '<div class="m" style="margin-top:16px"><b>Billed To</b><br>Admin ID: ' + subEsc(libId) + (wallet.id ? '<br>Wallet UID: ' + subEsc(wallet.id) : '') + (function(){ try { const c = (saReadLibrary(libId) || {}).config || {}; return (c.libName ? '<br>Library Name: ' + subEsc(c.libName) : '') + (c.address ? '<br>Address: ' + subEsc(c.address) : '') + (c.mobile ? '<br>Mobile: ' + subEsc(c.mobile) : '') + (c.ownerName ? '<br>Owner: ' + subEsc(c.ownerName) : ''); } catch (e) { return ''; } })() + '</div>' +
         '<table><tr><th>Description</th><th>Period</th><th style="text-align:right">Amount</th></tr><tr><td>' + subEsc(h.planName) + ' Plan (' + h.months + ' month' + (h.months > 1 ? 's' : '') + ')</td><td>' + subFmt(ps) + ' – ' + subFmt(pe) + '</td><td style="text-align:right">₹' + h.amount + '</td></tr></table>' +
         '<div class="t">Total Paid: ₹' + h.amount + '</div>' +
         '<table class="box" style="margin-top:20px">' + row('Invoice Number', subEsc(no)) + row('Transaction ID', subEsc(txn)) + row('Payment Mode', 'Samarthak Wallet') + (h.acceptedBy ? row('Accepted By', subEsc(h.acceptedBy)) : '') + (h.forfeitedDays > 0 ? row('Previous plan days forfeited', h.forfeitedDays + ' day(s) (plan changed)') : '') +
@@ -4438,14 +4454,14 @@ function saAllTxns(wallet){ return (wallet.archivedTransactions || []).concat(wa
 function saRenderWalletChargeRequests(wallet){
     const el = document.getElementById('sa-wallet-charge-requests'); if (!el) return;
     const reqs = (wallet.chargeRequests || []).slice().sort((a, b) => new Date(b.requestedAt) - new Date(a.requestedAt));
-    if (!reqs.length) { el.innerHTML = '<div style="text-align:center;color:var(--grey);font-size:0.78rem;padding:20px 10px;">No renewal requests yet. Use “Request Renewal Charge”, or the system sends one automatically on the renewal date when Auto-Renew is OFF.</div>'; return; }
+    if (!reqs.length) { el.innerHTML = '<div style="text-align:center;color:var(--grey);font-size:0.78rem;padding:20px 10px;">No renewal requests yet. Use “Request Renewal Charge”, or wait for the system to send one automatically on the renewal date (this happens when the Admin has Auto-Renewal OFF).</div>'; return; }
     el.innerHTML = reqs.map(rq => {
         const st = rq.status === 'Pending' ? '<span style="color:#0369a1;font-weight:800;">🕓 Pending — waiting for Admin</span>'
             : rq.status === 'Approved' ? '<span style="color:#16a34a;font-weight:800;">✅ Approved &amp; Deducted</span>'
             : '<span style="color:#dc2626;font-weight:800;">❌ Rejected by Admin</span>';
         const origin = rq.auto ? '🔁 Auto-renewal (Auto-Renew ON)' : rq.autoSent ? '🤖 Sent automatically on the renewal date' : rq.acceptedBy ? '✅ Accepted by ' + subEsc(rq.acceptedBy) : '👤 Sent by Super Admin';
         return '<div style="background:#fff;border:1px solid #bae6fd;border-radius:10px;padding:10px;margin-bottom:8px;font-size:0.74rem;">' +
-            '<div style="display:flex;justify-content:space-between;gap:8px;"><strong>🔄 ' + (rq.plan ? subEsc(rq.plan.name) + ' plan (' + rq.plan.months + ' mo)' : 'Renewal Charge') + ' — ₹' + rq.amount + '</strong><span>' + saFmtWalletDate(rq.requestedAt) + '</span></div>' +
+            '<div style="display:flex;justify-content:space-between;gap:8px;"><strong>🔄 ' + (rq.plan ? subEsc(rq.plan.name) + ' plan (' + rq.plan.months + ' month' + (rq.plan.months > 1 ? 's' : '') + ')' : 'Renewal Charge') + ' — ₹' + rq.amount + '</strong><span>' + saFmtWalletDate(rq.requestedAt) + '</span></div>' +
             '<div style="color:var(--grey);margin-top:2px;">' + origin + '</div>' + (rq.note ? '<div style="color:var(--grey);margin-top:2px;">' + subEsc(rq.note) + '</div>' : '') +
             '<div style="margin-top:4px;">' + st + (rq.decidedAt ? ' <span style="color:var(--grey);">• ' + saFmtWalletDate(rq.decidedAt) + '</span>' : '') + '</div>' +
             (rq.status === 'Rejected' && rq.decisionReason ? '<div style="color:#991b1b;margin-top:4px;">Reason: ' + subEsc(rq.decisionReason) + '</div>' : '') + '</div>';
@@ -4468,7 +4484,7 @@ function renderSaSubModal(){
     hint.innerHTML = !setupDone ? '⛔ Not applicable: the Admin has not completed First-Time Wallet Setup &amp; AI Video eKYC yet.'
         : wallet.status === 'deactivated' ? '⏸ Wallet is Deactivated — renewal requests are blocked until the Admin reactivates it.'
         : wallet.status !== 'active' ? '⛔ Renewal requests cannot be sent while the wallet is ' + wallet.status + '.'
-        : 'On Accept by the Admin the amount is deducted and the subscription is activated/extended. When the renewal date arrives and Auto-Renew is OFF, the system sends the request automatically.';
+        : 'When the Admin accepts a request, the amount is deducted from their wallet and the subscription is activated or extended. If Auto-Renewal is OFF, the system automatically sends a renewal request to the Admin when the renewal date arrives.';
 }
 function saRenderWalletLockHistory(wallet){
     const el = document.getElementById('sa-wallet-lock-history-panel');
@@ -4577,8 +4593,11 @@ function closeSaAccessAdminModal(){
     _saAccessTargetId = null;
 }
 
+let _saAccessMinutes = 30;
 function saAccessSendButtonHtml(){
-    return `<button onclick="saSendAccessRequest()" style="background:#5b21b6;color:#fff;width:100%;padding:12px;border-radius:10px;border:none;font-weight:800;">📨 Send Access Request</button>
+    const opts = [10,20,30,40,50,60].map(m => `<option value="${m}"${m === _saAccessMinutes ? ' selected' : ''}>${m} minutes</option>`).join('');
+    return `<div class="input-group" style="margin-bottom:12px;"><label>Access Time</label><select id="sa-access-minutes" onchange="_saAccessMinutes = parseInt(this.value, 10)">${opts}</select></div>
+        <button onclick="saSendAccessRequest()" style="background:#5b21b6;color:#fff;width:100%;padding:12px;border-radius:10px;border:none;font-weight:800;">📨 Send Access Request</button>
         <div style="font-size:0.72rem;color:var(--grey);text-align:center;margin-top:8px;">The admin will see this on their dashboard and can Accept or Reject it. It expires automatically after 10 minutes if there's no response.</div>`;
 }
 
@@ -4648,6 +4667,7 @@ function saSendAccessRequest(){
         adminId,
         requestedAt: now,
         expiresAt: now + 10 * 60 * 1000,
+        accessMinutes: _saAccessMinutes,
         status: 'pending',
         actionAt: null,
         cooldownUntil: null
@@ -6894,6 +6914,25 @@ window.addEventListener('storage', function (e) {
         if (typeof saRenderAdminsPanel === 'function') saRenderAdminsPanel();
     }
 });
+
+// ===== LIVE SYNC: Manage Subscription / Wallet modals update instantly (no page refresh) =====
+(function(){
+    var last = {};
+    function sig(){ try { var d = saReadLibrary(_saWalletAdminId) || {}; return JSON.stringify(d.wallet || {}); } catch (e) { return ''; } }
+    function tick(){
+        if (typeof _saWalletAdminId === 'undefined' || !_saWalletAdminId) return;
+        var sub = document.getElementById('sa-sub-modal'), wal = document.getElementById('sa-wallet-modal');
+        var subOpen = sub && sub.style.display === 'flex', walOpen = wal && wal.style.display === 'flex';
+        if (!subOpen && !walOpen) return;
+        var g = sig(); var key = _saWalletAdminId + (subOpen ? 's' : '') + (walOpen ? 'w' : '');
+        if (last.k === key && last.g === g) return;
+        last = { k: key, g: g };
+        try { if (subOpen) renderSaSubModal(); } catch (e) {}
+        try { if (walOpen) renderSaWalletModal(); } catch (e) {}
+    }
+    setInterval(tick, 1000);
+    window.addEventListener('storage', function(){ last = {}; tick(); });
+})();
 </script>
 
 </body>
