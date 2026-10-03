@@ -891,6 +891,11 @@
                 <label style="font-size:0.72rem;font-weight:800;color:var(--grey);">Subscription Plan</label>
                 <select id="sa-charge-plan" onchange="saChargePlanChanged()" style="width:100%;padding:11px;border-radius:10px;border:1.5px solid var(--border);font-size:0.82rem;margin-top:4px;"></select>
                 <div id="sa-charge-plan-info" style="font-size:0.7rem;color:#0369a1;font-weight:700;margin-top:6px;"></div>
+                <label style="font-size:0.72rem;font-weight:800;color:var(--grey);display:block;margin-top:12px;">Payment Mode</label>
+                <select id="sa-charge-paymode" onchange="saChargeModeChanged()" style="width:100%;padding:11px;border-radius:10px;border:1.5px solid var(--border);font-size:0.82rem;margin-top:4px;"><option value="Wallet">💳 Wallet — Admin accepts and wallet is debited</option><option value="Cash">💵 Cash — received offline, subscription added instantly</option></select>
+                <label style="font-size:0.72rem;font-weight:800;color:var(--grey);display:block;margin-top:12px;">Discount % <span style="font-weight:600;">(optional)</span></label>
+                <input type="number" id="sa-charge-discount" min="0" max="100" step="0.01" placeholder="Leave empty for no discount" oninput="saChargeDiscountChanged()" style="width:100%;margin-top:4px;">
+                <div id="sa-charge-calc" style="font-size:0.72rem;font-weight:800;color:#166534;margin-top:6px;"></div>
             </div>
             <div class="input-group" style="margin-bottom:10px;">
                 <label>Amount (₹)</label>
@@ -1953,6 +1958,20 @@ function saRequestWalletRenewalCharge(adminId, amount, note, plan){
     data.wallet = wallet;
     saWriteLibrary(adminId, data);
     return req;
+}
+// Cash renewal: bypasses the wallet completely (no debit, no wallet transaction). The subscription is added
+// right away and the history / invoice record the payment mode as Cash.
+function saApplyCashRenewal(adminId, amount, note, plan){
+    const data = saReadLibrary(adminId) || {};
+    const w = saEnsureWalletShape(data.wallet);
+    if (w.status !== 'active') throw new Error('A cash renewal can only be added while the wallet is Active.');
+    const nowIso = new Date().toISOString(), txnId = 'CSH' + Date.now().toString().slice(-8) + Math.floor(10 + Math.random() * 90);
+    w.chargeRequests = w.chargeRequests || [];
+    w.chargeRequests.forEach(function(r){ if (r.status === 'Pending') { r.status = 'Rejected'; r.decidedAt = nowIso; r.decisionReason = 'Auto-rejected: renewed by cash payment'; } });
+    w.chargeRequests.push({ id: 'WCR' + Date.now() + Math.floor(Math.random() * 1000), type: 'renewal', amount: amount, note: note || '', status: 'Approved', requestedAt: nowIso, decidedAt: nowIso, decisionReason: null, plan: plan, paymentMode: 'Cash', acceptedBy: 'Super Admin (Cash)', txnId: txnId });
+    subApplyTerm(w, plan, amount, txnId, w.subscription ? !!w.subscription.autoRenew : false, false);
+    data.wallet = w; saWriteLibrary(adminId, data);
+    return { txnId: txnId };
 }
 // Freeze puts EVERY wallet transaction on hold — funding, all three charge types (including
 // Penalty, which is otherwise the one charge allowed while merely Deactivated), and the Admin's
@@ -4133,13 +4152,14 @@ function saChargePlanUi(type){
     document.getElementById('sa-charge-plan').innerHTML = '<option value="">— Plan select karein —</option>' +
         a.map(p => `<option value="${p.id}">${p.name} — ₹${p.price} / ${p.months} month${p.months > 1 ? 's' : ''}</option>`).join('');
     document.getElementById('sa-charge-plan-info').innerHTML = ''; _saAutoNote = '';
+    document.getElementById('sa-charge-paymode').value = 'Wallet'; document.getElementById('sa-charge-discount').value = ''; document.getElementById('sa-charge-calc').innerHTML = '';
 }
 let _saAutoNote = '';
 function saChargePlanChanged(){
     const p = saGetPlans().find(x => x.id === document.getElementById('sa-charge-plan').value);
     const info = document.getElementById('sa-charge-plan-info'), note = document.getElementById('sa-charge-note');
     if (!p) { info.innerHTML = ''; if (note.value.trim() === _saAutoNote) note.value = ''; _saAutoNote = ''; return; }
-    document.getElementById('sa-charge-amount').value = p.price;
+    document.getElementById('sa-charge-amount').value = p.price; saChargeDiscountChanged();
     const auto = p.name + ' plan (' + p.months + ' month' + (p.months > 1 ? 's' : '') + ')';
     // Replace the auto-filled note when the plan changes (otherwise the old plan's text stayed behind), but never overwrite the Super Admin's own text.
     if (!note.value.trim() || note.value.trim() === _saAutoNote) note.value = auto;
@@ -4148,10 +4168,27 @@ function saChargePlanChanged(){
     info.style.color = '#0369a1';
     info.innerHTML = subPlanNote(w && w.subscription, p, 'super') || ('When the Admin accepts, a ' + p.months + '-month subscription is activated.');
 }
+function saChargeDiscountChanged(){
+    const p = saGetPlans().find(x => x.id === document.getElementById('sa-charge-plan').value);
+    const calc = document.getElementById('sa-charge-calc'); let d = parseFloat(document.getElementById('sa-charge-discount').value);
+    if (!(d > 0)) { d = 0; }
+    if (d > 100) { calc.style.color = '#dc2626'; calc.innerHTML = 'Discount cannot be more than 100%.'; return; }
+    if (!p) { calc.style.color = '#64748b'; calc.innerHTML = d ? 'Select a plan to apply the discount.' : ''; return; }
+    const amt = Math.round(p.price * (100 - d)) / 100;
+    document.getElementById('sa-charge-amount').value = amt;
+    calc.style.color = '#166534';
+    calc.innerHTML = d ? ('₹' + p.price + ' − ' + d + '% (₹' + (Math.round(p.price * d) / 100) + ') = ₹' + amt + ' payable') : '';
+}
+function saChargeModeChanged(){
+    const cash = document.getElementById('sa-charge-paymode').value === 'Cash', btn = document.getElementById('sa-charge-confirm-btn');
+    btn.innerText = cash ? '💵 Receive Cash & Add Subscription' : SA_CHARGE_META.renewal.btnLabel;
+}
 function saSelectedPlanSnapshot(){
     const el = document.getElementById('sa-charge-plan'); if (!el || !el.value) return null;
     const p = saGetPlans().find(x => x.id === el.value);
-    return p ? { id: p.id, name: p.name, price: p.price, months: p.months } : null;
+    if (!p) return null;
+    let d = parseFloat(document.getElementById('sa-charge-discount').value); if (!(d > 0) || d > 100) d = 0;
+    return { id: p.id, name: p.name, price: p.price, months: p.months, listPrice: p.price, discountPercent: d, discountAmount: Math.round(p.price * d) / 100, paymentMode: document.getElementById('sa-charge-paymode').value };
 }
 // ===== SUBSCRIPTION CARD + INVOICE (shared logic) =====
 function subEsc(t){ return String(t == null ? '' : t).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -4202,10 +4239,10 @@ function subInvoiceHtml(wallet, libId, h, idx){
     return '<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + subEsc(no) + '</title><style>body{font-family:Arial,sans-serif;color:#0f172a;max-width:720px;margin:30px auto;padding:0 20px}h1{margin:0;font-size:1.5rem;color:#0369a1}.top{display:flex;justify-content:space-between;border-bottom:3px solid #0369a1;padding-bottom:14px}.m{font-size:.85rem;line-height:1.7}table{width:100%;border-collapse:collapse;margin-top:18px}th,td{padding:10px;text-align:left;border-bottom:1px solid #e2e8f0;font-size:.88rem}th{background:#f1f5f9}.box td{padding:7px 10px;font-size:.85rem}.t{text-align:right;font-size:1.1rem;font-weight:800;margin-top:16px}.paid{display:inline-block;border:2px solid #16a34a;color:#16a34a;font-weight:800;padding:3px 12px;border-radius:6px;margin-top:8px}.f{margin-top:36px;font-size:.72rem;color:#64748b;text-align:center}@media print{body{margin:0}}</style></head><body>' +
         '<div class="top"><div><h1>Samarthak</h1><div class="m">Subscription Invoice</div></div><div class="m" style="text-align:right"><b style="font-size:1.05rem">' + subEsc(no) + '</b><br>Date: ' + subFmt(h.date) + '<br><span class="paid">PAID</span></div></div>' +
         '<div class="m" style="margin-top:16px"><b>Billed To</b><br>Admin ID: ' + subEsc(libId) + (wallet.id ? '<br>Wallet UID: ' + subEsc(wallet.id) : '') + (function(){ try { const c = (saReadLibrary(libId) || {}).config || {}; return (c.libName ? '<br>Library Name: ' + subEsc(c.libName) : '') + (c.address ? '<br>Address: ' + subEsc(c.address) : '') + (c.mobile ? '<br>Mobile: ' + subEsc(c.mobile) : '') + (c.ownerName ? '<br>Owner: ' + subEsc(c.ownerName) : ''); } catch (e) { return ''; } })() + '</div>' +
-        '<table><tr><th>Description</th><th>Period</th><th style="text-align:right">Amount</th></tr><tr><td>' + subEsc(h.planName) + ' Plan (' + h.months + ' month' + (h.months > 1 ? 's' : '') + ')</td><td>' + subFmt(ps) + ' – ' + subFmt(pe) + '</td><td style="text-align:right">₹' + h.amount + '</td></tr></table>' +
+        '<table><tr><th>Description</th><th>Period</th><th style="text-align:right">Amount</th></tr><tr><td>' + subEsc(h.planName) + ' Plan (' + h.months + ' month' + (h.months > 1 ? 's' : '') + ')</td><td>' + subFmt(ps) + ' – ' + subFmt(pe) + '</td><td style="text-align:right">₹' + (h.listPrice || h.amount) + '</td></tr></table>' +
         '<div class="t">Total Paid: ₹' + h.amount + '</div>' +
-        '<table class="box" style="margin-top:20px">' + row('Invoice Number', subEsc(no)) + row('Transaction ID', subEsc(txn)) + row('Payment Mode', 'Samarthak Wallet') + (h.acceptedBy ? row('Accepted By', subEsc(h.acceptedBy)) : '') + (h.forfeitedDays > 0 ? row('Previous plan days forfeited', h.forfeitedDays + ' day(s) (plan changed)') : '') +
-            row('Auto Renewal', h.auto ? 'Yes — this payment was auto-renewed' : 'No — renewed manually (Admin accepted)') +
+        '<table class="box" style="margin-top:20px">' + row('Plan Price', '₹' + (h.listPrice || h.amount)) + row('Discount Given', (h.discountPercent > 0) ? (h.discountPercent + '% (− ₹' + (h.discountAmount || 0) + ')') : 'No discount (0%)') + row('Percent of Price Paid', (100 - (h.discountPercent || 0)) + '%') + row('Invoice Number', subEsc(no)) + row('Transaction ID', subEsc(txn)) + row('Payment Mode', h.paymentMode === 'Cash' ? 'Cash (received by Super Admin)' : 'Samarthak Wallet') + (h.acceptedBy ? row('Accepted By', subEsc(h.acceptedBy)) : '') + (h.forfeitedDays > 0 ? row('Previous plan days forfeited', h.forfeitedDays + ' day(s) (plan changed)') : '') +
+            row('Auto Renewal', h.auto ? 'Yes — this payment was auto-renewed' : (h.paymentMode === 'Cash' ? 'No — paid in cash, added by Super Admin' : 'No — renewed manually (Admin accepted)')) +
             (isLast && wallet.subscription ? row('Auto-Renewal for next term', wallet.subscription.autoRenew ? 'ON' : 'OFF') : '') + '</table>' +
         '<div class="f">This is a computer-generated invoice and does not require a signature.</div></body></html>';
 }
@@ -4266,7 +4303,7 @@ function subApplyTerm(w, plan, amount, txnId, auto, isAutoCharge){
     if (stack) { start.setTime(new Date(old.expiresAt).getTime()); start.setDate(start.getDate() + 1); start.setHours(0, 0, 0, 0); }
     const end = new Date(start); end.setMonth(end.getMonth() + plan.months); end.setDate(end.getDate() - 1); end.setHours(23, 59, 59, 999);
     const hist = (old && old.history) || [];
-    hist.push({ planName: plan.name, months: plan.months, amount: amount, date: now.toISOString(), txnId: txnId, periodStart: start.toISOString(), periodEnd: end.toISOString(), auto: !!isAutoCharge, forfeitedDays: mode.kind === 'change' ? mode.days : 0 });
+    hist.push({ planName: plan.name, months: plan.months, amount: amount, date: now.toISOString(), txnId: txnId, periodStart: start.toISOString(), periodEnd: end.toISOString(), auto: !!isAutoCharge, forfeitedDays: mode.kind === 'change' ? mode.days : 0, paymentMode: plan.paymentMode || 'Wallet', listPrice: plan.listPrice || plan.price || amount, discountPercent: plan.discountPercent || 0, discountAmount: plan.discountAmount || 0 });
     w.subscription = { planId: plan.id, planName: plan.name, months: plan.months, price: plan.price || amount, autoRenew: !!auto, startedAt: stack ? (old.startedAt || start.toISOString()) : start.toISOString(), expiresAt: end.toISOString(), history: hist };
 }
 // Fully automatic renewal on the Next Renewal date (Auto-Renew ON). Uses the Super Admin's CURRENT plan definition (so plan edits apply),
@@ -4419,15 +4456,23 @@ function saCloseChargeModal(){ document.getElementById('sa-charge-modal').style.
 function saConfirmChargeModal(){
     if (!_saWalletAdminId || !_saChargeType) return;
     hideErrEl('err-sa-charge-amount'); hideErrEl('err-sa-charge-note');
-    const amount = parseFloat(document.getElementById('sa-charge-amount').value);
+    let amount = parseFloat(document.getElementById('sa-charge-amount').value);
+    { const _sn = _saChargeType === 'renewal' ? saSelectedPlanSnapshot() : null; if (_sn && _sn.discountPercent > 0) amount = Math.round(_sn.price * (100 - _sn.discountPercent)) / 100; }
     if (!amount || amount <= 0) { document.getElementById('err-sa-charge-amount').style.display = 'block'; return; }
     const note = document.getElementById('sa-charge-note').value.trim();
     if (_saChargeType === 'penalty' && !note) { document.getElementById('err-sa-charge-note').style.display = 'block'; return; }
     try {
         if (_saChargeType === 'renewal') {
-            if (!saSelectedPlanSnapshot() && !confirm('Koi plan select nahi hai — sirf amount ka renewal request bhejein (subscription activate nahi hoga)?')) return;
-            saRequestWalletRenewalCharge(_saWalletAdminId, amount, note, saSelectedPlanSnapshot());
+            const _snap = saSelectedPlanSnapshot();
+            if (_snap && _snap.paymentMode === 'Cash') {
+                if (!confirm('Confirm that ₹' + amount + ' was received in CASH from this Admin?\n\n' + _snap.name + ' plan will be added immediately. The wallet is not used.')) return;
+                const r = saApplyCashRenewal(_saWalletAdminId, amount, note, _snap);
+                alert('✅ Cash received: ₹' + amount + '. Subscription added.\nReference: ' + r.txnId);
+            } else {
+            if (!_snap && !confirm('Koi plan select nahi hai — sirf amount ka renewal request bhejein (subscription activate nahi hoga)?')) return;
+            saRequestWalletRenewalCharge(_saWalletAdminId, amount, note, _snap);
             alert('✅ Renewal charge request of ₹' + amount + ' sent to the Admin for approval.');
+            }
         } else {
             const result = saDeductWalletCharge(_saWalletAdminId, amount, _saChargeType, note);
             alert('✅ ₹' + amount + ' deducted (' + _saChargeType + ').\nTransaction ID: ' + result.txnId + '\nNew Balance: ₹' + result.newBalance);
@@ -4459,7 +4504,7 @@ function saRenderWalletChargeRequests(wallet){
         const st = rq.status === 'Pending' ? '<span style="color:#0369a1;font-weight:800;">🕓 Pending — waiting for Admin</span>'
             : rq.status === 'Approved' ? '<span style="color:#16a34a;font-weight:800;">✅ Approved &amp; Deducted</span>'
             : '<span style="color:#dc2626;font-weight:800;">❌ Rejected by Admin</span>';
-        const origin = rq.auto ? '🔁 Auto-renewal (Auto-Renew ON)' : rq.autoSent ? '🤖 Sent automatically on the renewal date' : rq.acceptedBy ? '✅ Accepted by ' + subEsc(rq.acceptedBy) : '👤 Sent by Super Admin';
+        const origin = rq.paymentMode === 'Cash' ? '💵 Paid in Cash — added by Super Admin (wallet not used)' : rq.auto ? '🔁 Auto-renewal (Auto-Renew ON)' : rq.autoSent ? '🤖 Sent automatically on the renewal date' : rq.acceptedBy ? '✅ Accepted by ' + subEsc(rq.acceptedBy) : '👤 Sent by Super Admin';
         return '<div style="background:#fff;border:1px solid #bae6fd;border-radius:10px;padding:10px;margin-bottom:8px;font-size:0.74rem;">' +
             '<div style="display:flex;justify-content:space-between;gap:8px;"><strong>🔄 ' + (rq.plan ? subEsc(rq.plan.name) + ' plan (' + rq.plan.months + ' month' + (rq.plan.months > 1 ? 's' : '') + ')' : 'Renewal Charge') + ' — ₹' + rq.amount + '</strong><span>' + saFmtWalletDate(rq.requestedAt) + '</span></div>' +
             '<div style="color:var(--grey);margin-top:2px;">' + origin + '</div>' + (rq.note ? '<div style="color:var(--grey);margin-top:2px;">' + subEsc(rq.note) + '</div>' : '') +
