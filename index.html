@@ -891,11 +891,6 @@
                 <label style="font-size:0.72rem;font-weight:800;color:var(--grey);">Subscription Plan</label>
                 <select id="sa-charge-plan" onchange="saChargePlanChanged()" style="width:100%;padding:11px;border-radius:10px;border:1.5px solid var(--border);font-size:0.82rem;margin-top:4px;"></select>
                 <div id="sa-charge-plan-info" style="font-size:0.7rem;color:#0369a1;font-weight:700;margin-top:6px;"></div>
-                <label style="font-size:0.72rem;font-weight:800;color:var(--grey);display:block;margin-top:12px;">Payment Mode</label>
-                <select id="sa-charge-paymode" onchange="saChargeModeChanged()" style="width:100%;padding:11px;border-radius:10px;border:1.5px solid var(--border);font-size:0.82rem;margin-top:4px;"><option value="Wallet">💳 Wallet — Admin accepts and wallet is debited</option><option value="Cash">💵 Cash — received offline, subscription added instantly</option></select>
-                <label style="font-size:0.72rem;font-weight:800;color:var(--grey);display:block;margin-top:12px;">Discount % <span style="font-weight:600;">(optional)</span></label>
-                <input type="number" id="sa-charge-discount" min="0" max="100" step="0.01" placeholder="Leave empty for no discount" oninput="saChargeDiscountChanged()" style="width:100%;margin-top:4px;">
-                <div id="sa-charge-calc" style="font-size:0.72rem;font-weight:800;color:#166534;margin-top:6px;"></div>
             </div>
             <div class="input-group" style="margin-bottom:10px;">
                 <label>Amount (₹)</label>
@@ -1128,7 +1123,7 @@
         <div class="sa-modal-body">
             <div id="sa-plans-list"></div>
             <div style="background:#f8fafc;border:1px solid var(--border);border-radius:12px;padding:12px;margin-top:10px;">
-                <div id="sa-plan-form-title" style="font-size:0.76rem;font-weight:800;margin-bottom:8px;">➕ Naya Plan</div>
+                <div id="sa-plan-form-title" style="font-size:0.76rem;font-weight:800;margin-bottom:8px;">➕ New Plan</div>
                 <input type="text" id="sa-plan-name" placeholder="Plan name (e.g. Yearly)" style="width:100%;padding:10px;border-radius:10px;border:1.5px solid var(--border);font-size:0.8rem;box-sizing:border-box;margin-bottom:8px;">
                 <div style="display:flex;gap:8px;">
                     <input type="number" id="sa-plan-price" min="1" placeholder="Price ₹" style="flex:1;min-width:0;padding:10px;border-radius:10px;border:1.5px solid var(--border);font-size:0.8rem;box-sizing:border-box;">
@@ -1953,25 +1948,11 @@ function saRequestWalletRenewalCharge(adminId, amount, note, plan){
         decidedAt: null, decisionReason: null, plan: plan || null
     };
     wallet.chargeRequests = wallet.chargeRequests || [];
-    wallet.chargeRequests.forEach(function(r){ if (r.status === 'Pending') { r.status = 'Rejected'; r.decidedAt = new Date().toISOString(); r.decisionReason = 'Auto-rejected: replaced by a newer request'; } });
     wallet.chargeRequests.push(req);
+    subSupersedePending(wallet);
     data.wallet = wallet;
     saWriteLibrary(adminId, data);
     return req;
-}
-// Cash renewal: bypasses the wallet completely (no debit, no wallet transaction). The subscription is added
-// right away and the history / invoice record the payment mode as Cash.
-function saApplyCashRenewal(adminId, amount, note, plan){
-    const data = saReadLibrary(adminId) || {};
-    const w = saEnsureWalletShape(data.wallet);
-    if (w.status !== 'active') throw new Error('A cash renewal can only be added while the wallet is Active.');
-    const nowIso = new Date().toISOString(), txnId = 'CSH' + Date.now().toString().slice(-8) + Math.floor(10 + Math.random() * 90);
-    w.chargeRequests = w.chargeRequests || [];
-    w.chargeRequests.forEach(function(r){ if (r.status === 'Pending') { r.status = 'Rejected'; r.decidedAt = nowIso; r.decisionReason = 'Auto-rejected: renewed by cash payment'; } });
-    w.chargeRequests.push({ id: 'WCR' + Date.now() + Math.floor(Math.random() * 1000), type: 'renewal', amount: amount, note: note || '', status: 'Approved', requestedAt: nowIso, decidedAt: nowIso, decisionReason: null, plan: plan, paymentMode: 'Cash', acceptedBy: 'Super Admin (Cash)', txnId: txnId });
-    subApplyTerm(w, plan, amount, txnId, w.subscription ? !!w.subscription.autoRenew : false, false);
-    data.wallet = w; saWriteLibrary(adminId, data);
-    return { txnId: txnId };
 }
 // Freeze puts EVERY wallet transaction on hold — funding, all three charge types (including
 // Penalty, which is otherwise the one charge allowed while merely Deactivated), and the Admin's
@@ -3705,14 +3686,12 @@ function saRefreshChargeButtonsState(wallet){
 function saRenderFreezePanel(wallet){
     const body = document.getElementById('sa-wallet-freeze-body');
     if (!body) return;
-    if (wallet.status === 'closing' || wallet.status === 'closed') {
-        body.innerHTML = '<p style="font-size:0.74rem;color:var(--grey);margin:0;">Freezing isn\'t available while the wallet is closing or permanently closed.</p>';
+    if (!(wallet.setup && wallet.setup.done) && wallet.status !== 'frozen') {
+        body.innerHTML = '<p style="font-size:0.74rem;color:var(--grey);margin:0 0 10px;">🔒 Freeze Control is disabled until the Admin completes First-Time Wallet Setup &amp; AI Video eKYC. It becomes available automatically once that is done.</p><button disabled style="width:100%;background:#0369a1;color:#fff;border:none;padding:11px;border-radius:10px;font-weight:800;font-size:0.8rem;opacity:.4;cursor:not-allowed;">🧊 Freeze Wallet</button>';
         return;
     }
-    const _ekycDone = !!(wallet.setup && wallet.setup.done);
-    if (!_ekycDone && wallet.status !== 'frozen') {
-        body.innerHTML = '<p style=\"font-size:0.74rem;color:var(--grey);margin:0 0 10px;\">Freeze is disabled until the Admin completes the first-time Wallet Video eKYC. It will be enabled automatically once eKYC is done.</p>' +
-            '<button disabled style=\"width:100%;background:#94a3b8;color:#fff;border:none;padding:11px;border-radius:10px;font-weight:800;font-size:0.8rem;cursor:not-allowed;opacity:.6;\">Freeze Wallet (disabled)</button>';
+    if (wallet.status === 'closing' || wallet.status === 'closed') {
+        body.innerHTML = '<p style="font-size:0.74rem;color:var(--grey);margin:0;">Freezing isn\'t available while the wallet is closing or permanently closed.</p>';
         return;
     }
     if (wallet.status === 'frozen') {
@@ -3727,8 +3706,8 @@ function saRenderFreezePanel(wallet){
     }
 }
 function saOpenFreezeModal(){
+    { const _w = _saWalletAdminId ? saGetWallet(_saWalletAdminId) : null; if (_w && !(_w.setup && _w.setup.done)) { alert('❌ Freeze Control is disabled until the Admin completes First-Time Wallet Setup & AI Video eKYC.'); return; } }
     if (!_saWalletAdminId) return;
-    { const _w = saGetWallet(_saWalletAdminId); if (!(_w.setup && _w.setup.done)) { alert('Freeze is available only after the Admin completes the first-time Wallet Video eKYC.'); return; } }
     document.getElementById('sa-freeze-reason').value = '';
     hideErrEl('err-sa-freeze-reason');
     document.getElementById('sa-freeze-modal').style.display = 'flex';
@@ -4105,14 +4084,20 @@ function saOpenPlansModal(){ saEditPlan(null); saRenderPlans(); document.getElem
 function saClosePlansModal(){ document.getElementById('sa-plans-modal').style.display = 'none'; }
 function saRenderPlans(){
     const a = saGetPlans();
-    document.getElementById('sa-plans-list').innerHTML = a.length ? a.map(p =>
-        `<div style="display:flex;align-items:center;gap:8px;border:1px solid var(--border);border-radius:10px;padding:9px 11px;margin-bottom:6px;">
-            <div style="flex:1;min-width:0;"><div style="font-size:0.8rem;font-weight:800;">${p.name}</div><div style="font-size:0.68rem;color:var(--grey);">₹${p.price} • ${p.months} month${p.months > 1 ? 's' : ''}</div></div>
-            <span style="font-size:0.62rem;font-weight:800;padding:3px 7px;border-radius:20px;background:${p.active === false ? '#f1f5f9' : '#dcfce7'};color:${p.active === false ? '#64748b' : '#166534'};">${p.active === false ? 'Disabled' : 'Active'}</span>
-            <button style="border:none;background:${p.active === false ? '#f0fdf4' : '#fffbeb'};color:${p.active === false ? '#16a34a' : '#b45309'};padding:6px 10px;border-radius:8px;font-size:0.7rem;font-weight:800;cursor:pointer;" onclick="saTogglePlanActive('${p.id}')">${p.active === false ? 'Enable' : 'Disable'}</button>
+    document.getElementById('sa-plans-list').innerHTML = a.length ? a.map(p => {
+        const on = p.active !== false;
+        return `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;border:1px solid var(--border);border-radius:10px;padding:9px 11px;margin-bottom:6px;${on ? '' : 'background:#f8fafc;'}">
+            <div style="flex:1 1 120px;min-width:0;${on ? '' : 'opacity:.55;'}"><div style="font-size:0.8rem;font-weight:800;">${subEsc(p.name)}</div><div style="font-size:0.68rem;color:var(--grey);">₹${p.price} • ${p.months} month${p.months > 1 ? 's' : ''}</div></div>
+            <span style="font-size:0.62rem;font-weight:800;padding:3px 9px;border-radius:20px;color:#fff;background:${on ? '#16a34a' : '#94a3b8'};">${on ? 'Active' : 'Disabled'}</span>
+            <button style="border:none;background:${on ? '#fff7ed' : '#f0fdf4'};color:${on ? '#c2410c' : '#15803d'};padding:6px 10px;border-radius:8px;font-size:0.7rem;font-weight:800;cursor:pointer;" onclick="saTogglePlan('${p.id}')">${on ? 'Disable' : 'Enable'}</button>
             <button style="border:none;background:#eff6ff;color:#1e40af;padding:6px 10px;border-radius:8px;font-size:0.7rem;font-weight:800;cursor:pointer;" onclick="saEditPlan('${p.id}')">Edit</button>
             <button style="border:none;background:#fef2f2;color:#dc2626;padding:6px 10px;border-radius:8px;font-size:0.7rem;font-weight:800;cursor:pointer;" onclick="saDeletePlan('${p.id}')">Delete</button>
-        </div>`).join('') : '<div style="text-align:center;color:var(--grey);font-size:0.78rem;padding:12px;">Koi plan nahi hai — neeche naya banayein.</div>';
+        </div>`; }).join('') : '<div style="text-align:center;color:var(--grey);font-size:0.78rem;padding:12px;">No plans yet — create one below.</div>';
+}
+function saTogglePlan(id){
+    const a = saGetPlans(), p = a.find(x => x.id === id); if (!p) return;
+    p.active = p.active === false; // Active plans are listed in Request Renewal Charge; disabled ones are hidden (but not deleted).
+    saPutPlans(a); saRenderPlans();
 }
 function saEditPlan(id){
     _saEditPlanId = id;
@@ -4120,24 +4105,18 @@ function saEditPlan(id){
     document.getElementById('sa-plan-name').value = p ? p.name : '';
     document.getElementById('sa-plan-price').value = p ? p.price : '';
     document.getElementById('sa-plan-months').value = p ? p.months : '';
-    document.getElementById('sa-plan-form-title').innerText = p ? '✏️ Plan Edit karein' : '➕ Naya Plan';
+    document.getElementById('sa-plan-form-title').innerText = p ? '✏️ Edit Plan' : '➕ New Plan';
     document.getElementById('sa-plan-cancel').style.display = p ? 'block' : 'none';
 }
 function saSavePlan(){
     const name = document.getElementById('sa-plan-name').value.trim();
     const price = parseFloat(document.getElementById('sa-plan-price').value);
     const months = parseInt(document.getElementById('sa-plan-months').value, 10);
-    if (!name || !(price > 0) || !(months > 0)) { alert('❌ Plan name, price (>0) aur months (>0) zaroori hain.'); return; }
+    if (!name || !(price > 0) || !(months > 0)) { alert('❌ Plan name, price (greater than 0) and months (greater than 0) are required.'); return; }
     const a = saGetPlans();
     if (_saEditPlanId) { const p = a.find(x => x.id === _saEditPlanId); if (p) { p.name = name; p.price = price; p.months = months; } }
-    else a.push({ id: 'PLN' + Date.now(), name, price, months });
+    else a.push({ id: 'PLN' + Date.now(), name, price, months, active: true });
     saPutPlans(a); saEditPlan(null); saRenderPlans();
-}
-function saTogglePlanActive(id){
-    const a = saGetPlans(); const p = a.find(x => x.id === id); if (!p) return;
-    p.active = (p.active === false);
-    saPutPlans(a); saRenderPlans();
-    if (typeof saChargePlanUi === 'function' && document.getElementById('sa-charge-plan-wrap') && document.getElementById('sa-charge-plan-wrap').style.display === 'block') saChargePlanUi('renewal');
 }
 function saDeletePlan(id){
     if (!confirm('Delete this plan? Subscriptions that are already active will not be affected.')) return;
@@ -4149,17 +4128,16 @@ function saChargePlanUi(type){
     wrap.style.display = type === 'renewal' ? 'block' : 'none';
     if (type !== 'renewal') return;
     const a = saGetPlans().filter(p => p.active !== false);
-    document.getElementById('sa-charge-plan').innerHTML = '<option value="">— Plan select karein —</option>' +
+    document.getElementById('sa-charge-plan').innerHTML = '<option value="">' + (a.length ? '— Select a plan —' : '— No active plans (enable one in Manage Subscription Plans) —') + '</option>' +
         a.map(p => `<option value="${p.id}">${p.name} — ₹${p.price} / ${p.months} month${p.months > 1 ? 's' : ''}</option>`).join('');
     document.getElementById('sa-charge-plan-info').innerHTML = ''; _saAutoNote = '';
-    document.getElementById('sa-charge-paymode').value = 'Wallet'; document.getElementById('sa-charge-discount').value = ''; document.getElementById('sa-charge-calc').innerHTML = '';
 }
 let _saAutoNote = '';
 function saChargePlanChanged(){
     const p = saGetPlans().find(x => x.id === document.getElementById('sa-charge-plan').value);
     const info = document.getElementById('sa-charge-plan-info'), note = document.getElementById('sa-charge-note');
     if (!p) { info.innerHTML = ''; if (note.value.trim() === _saAutoNote) note.value = ''; _saAutoNote = ''; return; }
-    document.getElementById('sa-charge-amount').value = p.price; saChargeDiscountChanged();
+    document.getElementById('sa-charge-amount').value = p.price;
     const auto = p.name + ' plan (' + p.months + ' month' + (p.months > 1 ? 's' : '') + ')';
     // Replace the auto-filled note when the plan changes (otherwise the old plan's text stayed behind), but never overwrite the Super Admin's own text.
     if (!note.value.trim() || note.value.trim() === _saAutoNote) note.value = auto;
@@ -4168,27 +4146,10 @@ function saChargePlanChanged(){
     info.style.color = '#0369a1';
     info.innerHTML = subPlanNote(w && w.subscription, p, 'super') || ('When the Admin accepts, a ' + p.months + '-month subscription is activated.');
 }
-function saChargeDiscountChanged(){
-    const p = saGetPlans().find(x => x.id === document.getElementById('sa-charge-plan').value);
-    const calc = document.getElementById('sa-charge-calc'); let d = parseFloat(document.getElementById('sa-charge-discount').value);
-    if (!(d > 0)) { d = 0; }
-    if (d > 100) { calc.style.color = '#dc2626'; calc.innerHTML = 'Discount cannot be more than 100%.'; return; }
-    if (!p) { calc.style.color = '#64748b'; calc.innerHTML = d ? 'Select a plan to apply the discount.' : ''; return; }
-    const amt = Math.round(p.price * (100 - d)) / 100;
-    document.getElementById('sa-charge-amount').value = amt;
-    calc.style.color = '#166534';
-    calc.innerHTML = d ? ('₹' + p.price + ' − ' + d + '% (₹' + (Math.round(p.price * d) / 100) + ') = ₹' + amt + ' payable') : '';
-}
-function saChargeModeChanged(){
-    const cash = document.getElementById('sa-charge-paymode').value === 'Cash', btn = document.getElementById('sa-charge-confirm-btn');
-    btn.innerText = cash ? '💵 Receive Cash & Add Subscription' : SA_CHARGE_META.renewal.btnLabel;
-}
 function saSelectedPlanSnapshot(){
     const el = document.getElementById('sa-charge-plan'); if (!el || !el.value) return null;
     const p = saGetPlans().find(x => x.id === el.value);
-    if (!p) return null;
-    let d = parseFloat(document.getElementById('sa-charge-discount').value); if (!(d > 0) || d > 100) d = 0;
-    return { id: p.id, name: p.name, price: p.price, months: p.months, listPrice: p.price, discountPercent: d, discountAmount: Math.round(p.price * d) / 100, paymentMode: document.getElementById('sa-charge-paymode').value };
+    return p ? { id: p.id, name: p.name, price: p.price, months: p.months } : null;
 }
 // ===== SUBSCRIPTION CARD + INVOICE (shared logic) =====
 function subEsc(t){ return String(t == null ? '' : t).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -4207,6 +4168,15 @@ function subResolveTxn(wallet, h){
     if (!t) { const hd = new Date(h.date).getTime(); t = all.filter(x => x.type === 'debit' && x.chargeType === 'renewal' && x.amount == h.amount).sort((a, b) => Math.abs(new Date(a.date) - hd) - Math.abs(new Date(b.date) - hd))[0]; }
     return t ? t.id : (h.txnId || '—');
 }
+function subAutoText(sub, isAdmin){
+    const price = sub.price ? '₹' + sub.price : 'the plan fee';
+    if (sub.autoRenew) return isAdmin
+        ? 'Your plan renews by itself. On the Next Renewal date ' + price + ' is deducted from your wallet and the plan continues — there is no request to accept. If your balance is low, the wallet may go negative.'
+        : 'Set by the Admin. On the renewal date ' + price + ' is deducted from the Admin\'s wallet automatically, so no renewal request is needed. The balance may go negative if funds are low.';
+    return isAdmin
+        ? 'On the Next Renewal date we send you a renewal request. Accept it to continue — the fee is deducted when you accept. If it is not accepted within 5 days after expiry, new registrations, student work and fees are blocked.'
+        : 'Set by the Admin. On the renewal date the system sends the Admin a renewal request automatically. The Admin must accept it. If it is not accepted within 5 days after expiry, restrictions start on the Admin\'s dashboard.';
+}
 function subCardHtml(sub, isAdmin, wallet){
     if (!sub || !sub.expiresAt) return '<div style="font-size:0.84rem;font-weight:800;color:#0369a1;margin-bottom:6px;">💳 Subscription</div><div style="font-size:0.74rem;color:#64748b;">No active subscription plan yet.</div>' + (isAdmin ? subPolicyHtml() : '');
     const st = subStatus(sub), hist = sub.history || [], on = !!sub.autoRenew;
@@ -4219,30 +4189,32 @@ function subCardHtml(sub, isAdmin, wallet){
     return '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px;"><strong style="font-size:0.84rem;color:#0369a1;">💳 Subscription — ' + subEsc(sub.planName) + '</strong>' +
         '<span style="font-size:0.64rem;font-weight:800;color:#fff;background:' + st.color + ';padding:3px 10px;border-radius:20px;white-space:nowrap;">' + st.label + '</span></div>' +
         '<div style="font-size:0.74rem;font-weight:700;">Started: ' + subFmt(sub.startedAt) + ' &nbsp;•&nbsp; Next Renewal: ' + subFmt(sub.expiresAt) + '</div>' +
-        '<div style="font-size:0.72rem;color:' + st.color + ';font-weight:800;margin-top:3px;">' + (st.days >= 0 ? st.days + ' day(s) left' : Math.abs(st.days) + ' day(s) pehle expire ho gaya') + '</div>' +
-        '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px;background:linear-gradient(135deg,#fff,#f0f9ff);border:1px solid ' + (on ? '#86efac' : '#bae6fd') + ';border-radius:14px;padding:11px 13px;">' +
-            '<div style="min-width:0;"><div style="font-size:0.78rem;font-weight:800;">🔁 Auto-Renewal</div><div style="font-size:0.64rem;color:#64748b;line-height:1.4;margin-top:2px;">' + (on ? 'ON — on the renewal date, ' + sub.price + ' is deducted from the Admin\'s wallet automatically and the plan is extended. No request or approval is needed. (Balance may go negative.)' : 'OFF — on the renewal date the system sends a renewal request to the Admin. The plan is extended only after the Admin accepts it and the amount is deducted.') + '</div></div>' + sw + '</div>' +
+        '<div style="font-size:0.72rem;color:' + st.color + ';font-weight:800;margin-top:3px;">' + (st.days >= 0 ? st.days + ' day(s) left' : Math.abs(st.days) + ' day(s) ago (expired)') + '</div>' +
+        '<div style="margin-top:10px;background:linear-gradient(135deg,#fff,#f0f9ff);border:1px solid ' + (on ? '#86efac' : '#bae6fd') + ';border-radius:14px;padding:11px 13px;">' +
+            '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;"><div style="font-size:0.8rem;font-weight:800;">🔁 Auto-Renewal: <span style="color:' + (on ? '#16a34a' : '#64748b') + ';">' + (on ? 'ON' : 'OFF') + '</span>' + (isAdmin ? '' : ' <span style="font-weight:600;color:#64748b;font-size:0.66rem;">(set by the Admin)</span>') + '</div>' + (isAdmin ? sw : '') + '</div>' +
+            '<div style="font-size:0.68rem;color:#475569;line-height:1.55;margin-top:7px;">' + subAutoText(sub, isAdmin) + '</div></div>' +
         subRestrictLine(sub) +
         (wallet && wallet.balance < 0 && sub.autoNegative ? '<div style="margin-top:8px;background:#fef2f2;border:1px solid #fecaca;border-radius:12px;padding:10px 12px;font-size:0.68rem;line-height:1.5;color:#991b1b;"><b>⚠️ Why is the wallet balance negative?</b><br>The ' + (sub.autoNegative.kind === 'authority' ? 'renewal accepted by the Super Admin (authority granted by the Admin)' : 'Auto-Renewal') + ' of ₹' + sub.autoNegative.amount + ' (' + subEsc(sub.autoNegative.planName) + ' plan) on ' + subFmt(sub.autoNegative.date) + ' was deducted when the wallet had only ₹' + sub.autoNegative.balanceBefore + ', so the balance went to −₹' + Math.abs(sub.autoNegative.balanceAfter) + '. Please add funds to bring it back above zero.</div>' : '') +
         (hist.length ? '<div style="margin-top:10px;background:#fff;border:1px solid #bae6fd;border-radius:14px;padding:11px 13px;">' +
             '<div style="font-size:0.62rem;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:.05em;">Invoice Number</div>' +
             '<div class="sub-inv-no" style="font-size:0.95rem;font-weight:800;color:#0369a1;font-family:monospace;margin-top:2px;">' + subInvNo(hist[last], last) + '</div>' +
             '<div class="sub-inv-txn" style="font-size:0.66rem;color:#64748b;font-family:monospace;margin-top:2px;word-break:break-all;">Txn ID: ' + subEsc(subResolveTxn(wallet, hist[last])) + '</div>' +
-            (hist.length > 1 ? '<label style="display:block;font-size:0.66rem;font-weight:800;color:#64748b;margin:10px 0 4px;">Purana invoice chunein</label><select onchange="' + upd + '" style="width:100%;padding:9px;border-radius:10px;border:1.5px solid #e2e8f0;font-size:0.72rem;background:#fff;">' + opts + '</select>' : '<select style="display:none;"><option value="' + last + '" selected></option></select>') +
+            (hist.length > 1 ? '<label style="display:block;font-size:0.66rem;font-weight:800;color:#64748b;margin:10px 0 4px;">Select an older invoice</label><select onchange="' + upd + '" style="width:100%;padding:9px;border-radius:10px;border:1.5px solid #e2e8f0;font-size:0.72rem;background:#fff;">' + opts + '</select>' : '<select style="display:none;"><option value="' + last + '" selected></option></select>') +
             '<button style="width:100%;border:none;border-radius:10px;font-weight:800;cursor:pointer;background:linear-gradient(135deg,#0ea5e9,#0369a1);color:#fff;padding:11px;font-size:0.78rem;margin-top:10px;" onclick="subDownloadSelected(this)">⬇️ Download Invoice</button></div>' : '') + (isAdmin ? subPolicyHtml() : '');
 }
 function subDownloadSelected(btn){ subDownloadInvoice(parseInt(btn.parentNode.querySelector('select').value, 10)); }
-function subInvoiceHtml(wallet, libId, h, idx){
+function subInvoiceHtml(wallet, libId, h, idx, cfg){
+    cfg = cfg || {};
     const ps = h.periodStart || h.date, pe = h.periodEnd || (function(){ const d = new Date(ps); d.setMonth(d.getMonth() + (h.months || 1)); d.setDate(d.getDate() - 1); return d.toISOString(); })();
     const no = subInvNo(h, idx), txn = subResolveTxn(wallet, h), isLast = idx === ((wallet.subscription && wallet.subscription.history) || []).length - 1;
     const row = (k, v) => '<tr><td style="color:#64748b;width:45%">' + k + '</td><td><b>' + v + '</b></td></tr>';
     return '<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + subEsc(no) + '</title><style>body{font-family:Arial,sans-serif;color:#0f172a;max-width:720px;margin:30px auto;padding:0 20px}h1{margin:0;font-size:1.5rem;color:#0369a1}.top{display:flex;justify-content:space-between;border-bottom:3px solid #0369a1;padding-bottom:14px}.m{font-size:.85rem;line-height:1.7}table{width:100%;border-collapse:collapse;margin-top:18px}th,td{padding:10px;text-align:left;border-bottom:1px solid #e2e8f0;font-size:.88rem}th{background:#f1f5f9}.box td{padding:7px 10px;font-size:.85rem}.t{text-align:right;font-size:1.1rem;font-weight:800;margin-top:16px}.paid{display:inline-block;border:2px solid #16a34a;color:#16a34a;font-weight:800;padding:3px 12px;border-radius:6px;margin-top:8px}.f{margin-top:36px;font-size:.72rem;color:#64748b;text-align:center}@media print{body{margin:0}}</style></head><body>' +
         '<div class="top"><div><h1>Samarthak</h1><div class="m">Subscription Invoice</div></div><div class="m" style="text-align:right"><b style="font-size:1.05rem">' + subEsc(no) + '</b><br>Date: ' + subFmt(h.date) + '<br><span class="paid">PAID</span></div></div>' +
-        '<div class="m" style="margin-top:16px"><b>Billed To</b><br>Admin ID: ' + subEsc(libId) + (wallet.id ? '<br>Wallet UID: ' + subEsc(wallet.id) : '') + (function(){ try { const c = (saReadLibrary(libId) || {}).config || {}; return (c.libName ? '<br>Library Name: ' + subEsc(c.libName) : '') + (c.address ? '<br>Address: ' + subEsc(c.address) : '') + (c.mobile ? '<br>Mobile: ' + subEsc(c.mobile) : '') + (c.ownerName ? '<br>Owner: ' + subEsc(c.ownerName) : ''); } catch (e) { return ''; } })() + '</div>' +
-        '<table><tr><th>Description</th><th>Period</th><th style="text-align:right">Amount</th></tr><tr><td>' + subEsc(h.planName) + ' Plan (' + h.months + ' month' + (h.months > 1 ? 's' : '') + ')</td><td>' + subFmt(ps) + ' – ' + subFmt(pe) + '</td><td style="text-align:right">₹' + (h.listPrice || h.amount) + '</td></tr></table>' +
+        '<div class="m" style="margin-top:16px"><b>Billed To</b><br>' + (cfg.libName ? '<b>' + subEsc(cfg.libName) + '</b><br>' : '') + (cfg.ownerName ? 'Owner: ' + subEsc(cfg.ownerName) + '<br>' : '') + (cfg.address ? subEsc(cfg.address) + (cfg.pin ? ' – ' + subEsc(cfg.pin) : '') + '<br>' : '') + (cfg.mobile ? 'Mobile: ' + subEsc(cfg.mobile) + '<br>' : '') + 'Admin ID: ' + subEsc(libId) + (wallet.id ? '<br>Wallet UID: ' + subEsc(wallet.id) : '') + '</div>' +
+        '<table><tr><th>Description</th><th>Period</th><th style="text-align:right">Amount</th></tr><tr><td>' + subEsc(h.planName) + ' Plan (' + h.months + ' month' + (h.months > 1 ? 's' : '') + ')</td><td>' + subFmt(ps) + ' – ' + subFmt(pe) + '</td><td style="text-align:right">₹' + h.amount + '</td></tr></table>' +
         '<div class="t">Total Paid: ₹' + h.amount + '</div>' +
-        '<table class="box" style="margin-top:20px">' + row('Plan Price', '₹' + (h.listPrice || h.amount)) + row('Discount Given', (h.discountPercent > 0) ? (h.discountPercent + '% (− ₹' + (h.discountAmount || 0) + ')') : 'No discount (0%)') + row('Percent of Price Paid', (100 - (h.discountPercent || 0)) + '%') + row('Invoice Number', subEsc(no)) + row('Transaction ID', subEsc(txn)) + row('Payment Mode', h.paymentMode === 'Cash' ? 'Cash (received by Super Admin)' : 'Samarthak Wallet') + (h.acceptedBy ? row('Accepted By', subEsc(h.acceptedBy)) : '') + (h.forfeitedDays > 0 ? row('Previous plan days forfeited', h.forfeitedDays + ' day(s) (plan changed)') : '') +
-            row('Auto Renewal', h.auto ? 'Yes — this payment was auto-renewed' : (h.paymentMode === 'Cash' ? 'No — paid in cash, added by Super Admin' : 'No — renewed manually (Admin accepted)')) +
+        '<table class="box" style="margin-top:20px">' + row('Invoice Number', subEsc(no)) + row('Transaction ID', subEsc(txn)) + row('Payment Mode', 'Samarthak Wallet') + (h.acceptedBy ? row('Accepted By', subEsc(h.acceptedBy)) : '') + (h.forfeitedDays > 0 ? row('Previous plan days forfeited', h.forfeitedDays + ' day(s) (plan changed)') : '') +
+            row('Auto Renewal', h.auto ? 'Yes — this payment was auto-renewed' : 'No — renewed manually (Admin accepted)') +
             (isLast && wallet.subscription ? row('Auto-Renewal for next term', wallet.subscription.autoRenew ? 'ON' : 'OFF') : '') + '</table>' +
         '<div class="f">This is a computer-generated invoice and does not require a signature.</div></body></html>';
 }
@@ -4303,7 +4275,7 @@ function subApplyTerm(w, plan, amount, txnId, auto, isAutoCharge){
     if (stack) { start.setTime(new Date(old.expiresAt).getTime()); start.setDate(start.getDate() + 1); start.setHours(0, 0, 0, 0); }
     const end = new Date(start); end.setMonth(end.getMonth() + plan.months); end.setDate(end.getDate() - 1); end.setHours(23, 59, 59, 999);
     const hist = (old && old.history) || [];
-    hist.push({ planName: plan.name, months: plan.months, amount: amount, date: now.toISOString(), txnId: txnId, periodStart: start.toISOString(), periodEnd: end.toISOString(), auto: !!isAutoCharge, forfeitedDays: mode.kind === 'change' ? mode.days : 0, paymentMode: plan.paymentMode || 'Wallet', listPrice: plan.listPrice || plan.price || amount, discountPercent: plan.discountPercent || 0, discountAmount: plan.discountAmount || 0 });
+    hist.push({ planName: plan.name, months: plan.months, amount: amount, date: now.toISOString(), txnId: txnId, periodStart: start.toISOString(), periodEnd: end.toISOString(), auto: !!isAutoCharge, forfeitedDays: mode.kind === 'change' ? mode.days : 0 });
     w.subscription = { planId: plan.id, planName: plan.name, months: plan.months, price: plan.price || amount, autoRenew: !!auto, startedAt: stack ? (old.startedAt || start.toISOString()) : start.toISOString(), expiresAt: end.toISOString(), history: hist };
 }
 // Fully automatic renewal on the Next Renewal date (Auto-Renew ON). Uses the Super Admin's CURRENT plan definition (so plan edits apply),
@@ -4333,6 +4305,15 @@ function subAutoRequestCore(w){
     if (!(plan.price > 0)) return false;
     w.chargeRequests.push({ id: 'WCR' + Date.now() + Math.floor(Math.random() * 1000), type: 'renewal', amount: plan.price, note: 'Sent automatically by the system on the Next Renewal date', status: 'Pending', requestedAt: new Date().toISOString(), decidedAt: null, decisionReason: null, plan: plan, autoSent: true });
     s.autoRequestedFor = s.expiresAt;
+    return true;
+}
+// Only the newest pending renewal request stays pending; older unaccepted ones are rejected automatically.
+function subSupersedePending(w){
+    const p = (w.chargeRequests || []).filter(r => r.status === 'Pending' && r.type === 'renewal');
+    if (p.length < 2) return false;
+    p.sort((a, b) => new Date(a.requestedAt) - new Date(b.requestedAt));
+    const now = new Date().toISOString();
+    p.slice(0, -1).forEach(r => { r.status = 'Rejected'; r.decidedAt = now; r.decisionReason = 'Replaced automatically by a newer renewal request'; r.superseded = true; });
     return true;
 }
 // A direct renewal debit that is already represented by a charge request must not be listed twice.
@@ -4404,6 +4385,23 @@ function saAcceptByAuthority(adminId){
     if (_saWalletAdminId) renderSaWalletModal();
     saRenderAdminsPanel();
 }
+// ===== LIVE SYNC: changes made on the Admin dashboard (accept/reject, auto-renew, authority, invoices) show here without a refresh =====
+let _saLiveRaw = null, _saLiveTimer = null;
+function saLiveRefresh(){
+    try {
+        if (document.getElementById('sa-sub-modal').style.display === 'flex') renderSaSubModal();
+        if (document.getElementById('sa-wallet-modal') && document.getElementById('sa-wallet-modal').style.display === 'flex' && _saWalletAdminId) renderSaWalletModal();
+        saRenderDueRenewals();
+        if (typeof saRenderAdminsPanel === 'function') saRenderAdminsPanel();
+    } catch (e) {}
+}
+window.addEventListener('storage', function(){ clearTimeout(_saLiveTimer); _saLiveTimer = setTimeout(saLiveRefresh, 250); });
+setInterval(function(){
+    if (!_saWalletAdminId) { _saLiveRaw = null; return; }
+    const raw = localStorage.getItem(DB_KEY_PREFIX + _saWalletAdminId);
+    if (_saLiveRaw === null) { _saLiveRaw = raw; return; }
+    if (raw !== _saLiveRaw) { _saLiveRaw = raw; saLiveRefresh(); }
+}, 1500);
 function saRenderSubPanel(wallet){
     const el = document.getElementById('sa-wallet-sub-panel'); if (!el) return;
     const s = wallet.subscription; let extra = '';
@@ -4414,8 +4412,8 @@ function saRenderSubPanel(wallet){
 }
 function subDownloadInvoice(idx){
     const w = saGetWallet(_saWalletAdminId), h = w && w.subscription && w.subscription.history && w.subscription.history[idx];
-    if (!h) { alert('❌ Invoice data nahi mila.'); return; }
-    subOpenInvoice(subInvoiceHtml(w, _saWalletAdminId, h, idx), 'Invoice_' + (h.txnId || idx) + '.html');
+    if (!h) { alert('❌ Invoice data not found.'); return; }
+    subOpenInvoice(subInvoiceHtml(w, _saWalletAdminId, h, idx, (saReadLibrary(_saWalletAdminId) || {}).config), 'Invoice_' + (h.txnId || idx) + '.html');
 }
 // ===== MAINTENANCE / PENALTY / RENEWAL CHARGE MODAL =====
 let _saChargeType = null;
@@ -4456,23 +4454,15 @@ function saCloseChargeModal(){ document.getElementById('sa-charge-modal').style.
 function saConfirmChargeModal(){
     if (!_saWalletAdminId || !_saChargeType) return;
     hideErrEl('err-sa-charge-amount'); hideErrEl('err-sa-charge-note');
-    let amount = parseFloat(document.getElementById('sa-charge-amount').value);
-    { const _sn = _saChargeType === 'renewal' ? saSelectedPlanSnapshot() : null; if (_sn && _sn.discountPercent > 0) amount = Math.round(_sn.price * (100 - _sn.discountPercent)) / 100; }
+    const amount = parseFloat(document.getElementById('sa-charge-amount').value);
     if (!amount || amount <= 0) { document.getElementById('err-sa-charge-amount').style.display = 'block'; return; }
     const note = document.getElementById('sa-charge-note').value.trim();
     if (_saChargeType === 'penalty' && !note) { document.getElementById('err-sa-charge-note').style.display = 'block'; return; }
     try {
         if (_saChargeType === 'renewal') {
-            const _snap = saSelectedPlanSnapshot();
-            if (_snap && _snap.paymentMode === 'Cash') {
-                if (!confirm('Confirm that ₹' + amount + ' was received in CASH from this Admin?\n\n' + _snap.name + ' plan will be added immediately. The wallet is not used.')) return;
-                const r = saApplyCashRenewal(_saWalletAdminId, amount, note, _snap);
-                alert('✅ Cash received: ₹' + amount + '. Subscription added.\nReference: ' + r.txnId);
-            } else {
-            if (!_snap && !confirm('Koi plan select nahi hai — sirf amount ka renewal request bhejein (subscription activate nahi hoga)?')) return;
-            saRequestWalletRenewalCharge(_saWalletAdminId, amount, note, _snap);
+            if (!saSelectedPlanSnapshot() && !confirm('No plan is selected. Send an amount-only renewal request? (No subscription will be activated.)')) return;
+            saRequestWalletRenewalCharge(_saWalletAdminId, amount, note, saSelectedPlanSnapshot());
             alert('✅ Renewal charge request of ₹' + amount + ' sent to the Admin for approval.');
-            }
         } else {
             const result = saDeductWalletCharge(_saWalletAdminId, amount, _saChargeType, note);
             alert('✅ ₹' + amount + ' deducted (' + _saChargeType + ').\nTransaction ID: ' + result.txnId + '\nNew Balance: ₹' + result.newBalance);
@@ -4499,12 +4489,12 @@ function saAllTxns(wallet){ return (wallet.archivedTransactions || []).concat(wa
 function saRenderWalletChargeRequests(wallet){
     const el = document.getElementById('sa-wallet-charge-requests'); if (!el) return;
     const reqs = (wallet.chargeRequests || []).slice().sort((a, b) => new Date(b.requestedAt) - new Date(a.requestedAt));
-    if (!reqs.length) { el.innerHTML = '<div style="text-align:center;color:var(--grey);font-size:0.78rem;padding:20px 10px;">No renewal requests yet. Use “Request Renewal Charge”, or wait for the system to send one automatically on the renewal date (this happens when the Admin has Auto-Renewal OFF).</div>'; return; }
+    if (!reqs.length) { el.innerHTML = '<div style="text-align:center;color:var(--grey);font-size:0.78rem;padding:20px 10px;">No renewal requests yet. Use “Request Renewal Charge”, or the system sends one automatically on the renewal date when Auto-Renew is OFF.</div>'; return; }
     el.innerHTML = reqs.map(rq => {
         const st = rq.status === 'Pending' ? '<span style="color:#0369a1;font-weight:800;">🕓 Pending — waiting for Admin</span>'
             : rq.status === 'Approved' ? '<span style="color:#16a34a;font-weight:800;">✅ Approved &amp; Deducted</span>'
             : '<span style="color:#dc2626;font-weight:800;">❌ Rejected by Admin</span>';
-        const origin = rq.paymentMode === 'Cash' ? '💵 Paid in Cash — added by Super Admin (wallet not used)' : rq.auto ? '🔁 Auto-renewal (Auto-Renew ON)' : rq.autoSent ? '🤖 Sent automatically on the renewal date' : rq.acceptedBy ? '✅ Accepted by ' + subEsc(rq.acceptedBy) : '👤 Sent by Super Admin';
+        const origin = rq.auto ? '🔁 Auto-renewal (Auto-Renew ON)' : rq.autoSent ? '🤖 Sent automatically on the renewal date' : rq.acceptedBy ? '✅ Accepted by ' + subEsc(rq.acceptedBy) : '👤 Sent by Super Admin';
         return '<div style="background:#fff;border:1px solid #bae6fd;border-radius:10px;padding:10px;margin-bottom:8px;font-size:0.74rem;">' +
             '<div style="display:flex;justify-content:space-between;gap:8px;"><strong>🔄 ' + (rq.plan ? subEsc(rq.plan.name) + ' plan (' + rq.plan.months + ' month' + (rq.plan.months > 1 ? 's' : '') + ')' : 'Renewal Charge') + ' — ₹' + rq.amount + '</strong><span>' + saFmtWalletDate(rq.requestedAt) + '</span></div>' +
             '<div style="color:var(--grey);margin-top:2px;">' + origin + '</div>' + (rq.note ? '<div style="color:var(--grey);margin-top:2px;">' + subEsc(rq.note) + '</div>' : '') +
@@ -4529,7 +4519,7 @@ function renderSaSubModal(){
     hint.innerHTML = !setupDone ? '⛔ Not applicable: the Admin has not completed First-Time Wallet Setup &amp; AI Video eKYC yet.'
         : wallet.status === 'deactivated' ? '⏸ Wallet is Deactivated — renewal requests are blocked until the Admin reactivates it.'
         : wallet.status !== 'active' ? '⛔ Renewal requests cannot be sent while the wallet is ' + wallet.status + '.'
-        : 'When the Admin accepts a request, the amount is deducted from their wallet and the subscription is activated or extended. If Auto-Renewal is OFF, the system automatically sends a renewal request to the Admin when the renewal date arrives.';
+        : 'When the Admin accepts a request, the amount is deducted from the wallet and the subscription is activated or extended. If the Admin has Auto-Renewal turned OFF, the system sends a renewal request automatically on the renewal date, so you never need to send one manually. If Auto-Renewal is ON, the fee is deducted automatically and no request is needed.';
 }
 function saRenderWalletLockHistory(wallet){
     const el = document.getElementById('sa-wallet-lock-history-panel');
@@ -4638,11 +4628,8 @@ function closeSaAccessAdminModal(){
     _saAccessTargetId = null;
 }
 
-let _saAccessMinutes = 30;
 function saAccessSendButtonHtml(){
-    const opts = [10,20,30,40,50,60].map(m => `<option value="${m}"${m === _saAccessMinutes ? ' selected' : ''}>${m} minutes</option>`).join('');
-    return `<div class="input-group" style="margin-bottom:12px;"><label>Access Time</label><select id="sa-access-minutes" onchange="_saAccessMinutes = parseInt(this.value, 10)">${opts}</select></div>
-        <button onclick="saSendAccessRequest()" style="background:#5b21b6;color:#fff;width:100%;padding:12px;border-radius:10px;border:none;font-weight:800;">📨 Send Access Request</button>
+    return `<button onclick="saSendAccessRequest()" style="background:#5b21b6;color:#fff;width:100%;padding:12px;border-radius:10px;border:none;font-weight:800;">📨 Send Access Request</button>
         <div style="font-size:0.72rem;color:var(--grey);text-align:center;margin-top:8px;">The admin will see this on their dashboard and can Accept or Reject it. It expires automatically after 10 minutes if there's no response.</div>`;
 }
 
@@ -4712,7 +4699,6 @@ function saSendAccessRequest(){
         adminId,
         requestedAt: now,
         expiresAt: now + 10 * 60 * 1000,
-        accessMinutes: _saAccessMinutes,
         status: 'pending',
         actionAt: null,
         cooldownUntil: null
@@ -6959,25 +6945,6 @@ window.addEventListener('storage', function (e) {
         if (typeof saRenderAdminsPanel === 'function') saRenderAdminsPanel();
     }
 });
-
-// ===== LIVE SYNC: Manage Subscription / Wallet modals update instantly (no page refresh) =====
-(function(){
-    var last = {};
-    function sig(){ try { var d = saReadLibrary(_saWalletAdminId) || {}; return JSON.stringify(d.wallet || {}); } catch (e) { return ''; } }
-    function tick(){
-        if (typeof _saWalletAdminId === 'undefined' || !_saWalletAdminId) return;
-        var sub = document.getElementById('sa-sub-modal'), wal = document.getElementById('sa-wallet-modal');
-        var subOpen = sub && sub.style.display === 'flex', walOpen = wal && wal.style.display === 'flex';
-        if (!subOpen && !walOpen) return;
-        var g = sig(); var key = _saWalletAdminId + (subOpen ? 's' : '') + (walOpen ? 'w' : '');
-        if (last.k === key && last.g === g) return;
-        last = { k: key, g: g };
-        try { if (subOpen) renderSaSubModal(); } catch (e) {}
-        try { if (walOpen) renderSaWalletModal(); } catch (e) {}
-    }
-    setInterval(tick, 1000);
-    window.addEventListener('storage', function(){ last = {}; tick(); });
-})();
 </script>
 
 </body>
